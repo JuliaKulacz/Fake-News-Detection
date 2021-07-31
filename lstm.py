@@ -2,11 +2,13 @@ import pandas as pd
 import numpy as np
 import nltk
 import gensim
+from gensim.models import word2vec
 import matplotlib.pyplot as plt
 import seaborn as sns
 from wordcloud import WordCloud
 from nltk.corpus import stopwords
 from sklearn.model_selection import train_test_split
+from sklearn import feature_extraction, model_selection, manifold
 from sklearn.metrics import accuracy_score, confusion_matrix
 
 from tensorflow.keras.preprocessing.text import Tokenizer
@@ -16,23 +18,22 @@ from tensorflow.keras.layers import Dense, Embedding, LSTM, Bidirectional
 
 #DATA
 
-df_fake = pd.read_csv("Fake.csv")
-df_true = pd.read_csv("True.csv")
+df_fake = pd.read_csv("C:/Users/jurus/Documents/AGH/Praca inżynierska/Fake.csv")
+df_true = pd.read_csv("C:/Users/jurus/Documents/AGH/Praca inżynierska/True.csv")
 
-#DATA ANALYSIS
 
 # Adding a column to indicate whether the news is true or fake
 df_true['isfake'] = 0
 df_fake['isfake'] = 1
 
-# Concatenating True and Fake news
+#df = pd.concat([df_train, df_test]).reset_index(drop=True)
 df = pd.concat([df_true, df_fake]).reset_index(drop=True)
 df.drop(columns=['date'], inplace=True)
 
+#DATA ANALYSIS
+
 # Combining 'title' and 'text' colmuns together
 df['original'] = df['title'] + ' ' + df['text']
-#print(df['original'])
-
 
 #DATA CLEANING
 
@@ -50,7 +51,6 @@ def preprocess(text):
     return result
 
 df['clean'] = df['original'].apply(preprocess)
-#print(df)
 
 # All words present in dataset
 bag_of_words = []
@@ -60,14 +60,7 @@ for i in df.clean:
 
 # All unique words present in dataset in one string
 df['clean_joined'] = df['clean'].apply(lambda x: " ".join(x))
-print(df['original'][0])
-print(df['clean'][0])
-print(df['clean_joined'][0])
 
-#print(df['isfake'])
-
-df_shuffled = df.sample(frac=1).reset_index(drop=True)
-print(df_shuffled['isfake'])
 '''
 #VISUALIZING CLEANED UP DATA
 
@@ -90,9 +83,9 @@ plt.figure(figsize = (20,20))
 wc = WordCloud(max_words = 2000 , width = 1600 , height = 800 , stopwords = stop_words).generate(" ".join(df[df.isfake == 0].clean_joined))
 plt.imshow(wc, interpolation = 'bilinear')
 '''
-# Looking for sample with maximum length in a dataframe (needed to create word embeddings)
+# Looking for samlple with maximum length in a dataframe (needed to create word embeddings)
 maxlen = -1
-for doc in df_shuffled.clean_joined:
+for doc in df.clean_joined:
     tokens = nltk.word_tokenize(doc)
     if(maxlen<len(tokens)):
         maxlen = len(tokens)
@@ -101,41 +94,69 @@ print("The maximum number of words in any document is =", maxlen)
 #TOKENIZATION AND PADDING
 
 # Target class is 'isfake'
-x_train, x_test, y_train, y_test = train_test_split(df_shuffled.clean_joined, df_shuffled.isfake, test_size=0.2)
+x_train, x_test, y_train, y_test = train_test_split(df.clean_joined, df.isfake, test_size=0.2)
 
 # Number of unique words
 total_words = len(list(set(bag_of_words)))
 
+corpus = df["clean_joined"]
+
+# Creating list of lists of ngrams
+lst_coprus = []
+for string in corpus:
+    lst_words = string.split()
+    lst_grams = [" ".join(lst_words[i:i+1]) for i in range(0, len(lst_words), 1)]
+    lst_coprus.append(lst_grams)
+
+
+# Fitting Word2Vec
+nlp = word2vec.Word2Vec(lst_coprus, vector_size=300, window=8, min_count=1, sg=1)
+
 # Tokenizing words and creating sequneces of tokenized words
-tokenizer = Tokenizer(num_words = total_words)
+tokenizer = Tokenizer(num_words=total_words)
 tokenizer.fit_on_texts(x_train)
 train_sequences = tokenizer.texts_to_sequences(x_train)
 test_sequences = tokenizer.texts_to_sequences(x_test)
 
-print("The encoding for document\n", df_shuffled.clean_joined[0],"\n is : ",train_sequences[0])
+print("The encoding for document\n", df.clean_joined[0],"\n is : ",train_sequences[0])
 
 # Adding padding
-padding_train = pad_sequences(train_sequences, maxlen=40, padding='post', truncating='post')
-padding_test = pad_sequences(test_sequences, maxlen=40, truncating='post')
+padded_train = pad_sequences(train_sequences, maxlen=40, padding='post', truncating='post')
+padded_test = pad_sequences(test_sequences, maxlen=40, truncating='post')
+
+for i, doc in enumerate(padded_train[:2]):
+    print("The padded encoding for document", i+1, "is :", doc)
+
+# Starting th embedding matrix
+dic_vocabulary = tokenizer.word_index
+embeddings = np.zeros((len(dic_vocabulary)+1, 300))
+
+for word, idx in dic_vocabulary.items():
+    # Update the row with vector
+    try:
+        embeddings[idx] = nlp.wv[word]
+    # If word not in model skip and row stays all 0s
+    except:
+        pass
 
 #BUILDING AND TRAINING MODEL
 
 model = Sequential()
-model.add(Embedding(total_words, output_dim=128))
+model.add(Embedding(input_dim=embeddings.shape[0], output_dim=embeddings.shape[1], weights=[embeddings]))
 model.add(Bidirectional(LSTM(128)))
 model.add(Dense(128, activation='relu'))
-model.add(Dense(1, activation='sigmoid')) # Cause it's either 1 or 0
+model.add(Dense(1, activation='sigmoid'))
 model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['acc'])
 model.summary()
 
 y_train = np.asarray(y_train)
 
 #Training the model
-model.fit(padding_train, y_train, batch_size=64, validation_split=0.1, epochs=2)
+model.fit(padded_train, y_train, batch_size=64, validation_split=0.1, epochs=4)
 model.summary()
 
 #ASSESING TRAINED MODEL PERFORMANCE
-pred = model.predict(padding_test)
+pred = model.predict(padded_test)
 
 prediction = []
 # If hte prediction is > 0.5 then the news is real otherwise it is fake
@@ -154,4 +175,3 @@ c_matrix = confusion_matrix(list(y_test), prediction)
 plt.figure(figsize=(25,25))
 sns.heatmap(c_matrix, annot=True)
 plt.show()
-
